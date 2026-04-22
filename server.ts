@@ -1442,6 +1442,17 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
+
+    // Health check endpoint — required by ECS/ALB
+    app.get("/health", (req, res) => {
+      res.status(200).json({
+        status: "ok",
+        version: "1.2.0",
+        uptime: Math.floor(process.uptime()),
+        env: process.env.NODE_ENV,
+      });
+    });
+
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });

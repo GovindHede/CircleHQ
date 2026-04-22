@@ -1,0 +1,66 @@
+{
+  "family": "circlehq-bot",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::657521298427:role/circlehq-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::657521298427:role/circlehq-task-execution-role",
+  "containerDefinitions": [
+    {
+      "name": "circlehq-bot",
+      "image": "657521298427.dkr.ecr.us-east-1.amazonaws.com/circlehq-bot:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "TELEGRAM_BOT_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:657521298427:secret:circlehq/production:TELEGRAM_BOT_TOKEN::"
+        },
+        {
+          "name": "SUPABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:657521298427:secret:circlehq/production:SUPABASE_URL::"
+        },
+        {
+          "name": "SUPABASE_SERVICE_ROLE_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:657521298427:secret:circlehq/production:SUPABASE_SERVICE_ROLE_KEY::"
+        },
+        {
+          "name": "SUPABASE_ANON_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:657521298427:secret:circlehq/production:SUPABASE_ANON_KEY::"
+        },
+        {
+          "name": "GEMINI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:657521298427:secret:circlehq/production:GEMINI_API_KEY::"
+        }
+      ],
+      "environment": [
+        { "name": "NODE_ENV", "value": "production" },
+        { "name": "PORT", "value": "3000" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/circlehq-bot",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:3000/health || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}
