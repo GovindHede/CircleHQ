@@ -1,0 +1,5 @@
+{
+  "name": "CircleHQ",
+  "description": "AI-powered social concierge that intelligently introduces people for meaningful conversations via Telegram.",
+  "requestFramePermissions": []
+}
