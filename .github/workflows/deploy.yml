@@ -1,103 +1,150 @@
-name: 🚀 Build & Deploy CircleHQ Bot
+name: 🚀 CircleHQ — AWS ECS Deploy (MAANG Standard)
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch: # allows manual trigger from GitHub Actions tab
+  workflow_dispatch:
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+  CONTAINER_NAME: circlehq-bot
 
 jobs:
-  # ─────────────────────────────────────────────
-  # JOB 1: Build & push Docker image to GHCR
-  # ─────────────────────────────────────────────
-  build:
-    name: 🐳 Build & Push Docker Image
+  # ──────────────────────────────────────────────
+  # JOB 1: Run tests / lint checks
+  # ──────────────────────────────────────────────
+  quality:
+    name: 🔍 Code Quality Check
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
 
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔎 TypeScript type check
+        run: npm run lint
+        continue-on-error: true # non-blocking for now
+
+  # ──────────────────────────────────────────────
+  # JOB 2: Build & push Docker image to AWS ECR
+  # ──────────────────────────────────────────────
+  build:
+    name: 🐳 Build & Push to ECR
+    runs-on: ubuntu-latest
+    needs: quality
     outputs:
-      image_tag: ${{ steps.meta.outputs.tags }}
+      image: ${{ steps.build-image.outputs.image }}
 
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      - name: 🔐 Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: 🔐 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: 🏷️ Extract Docker metadata (tags & labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=sha-
-            type=raw,value=latest
+      - name: 🔑 Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: 🛠️ Set up Docker Buildx
+      - name: 🛠️ Set up Docker Buildx (faster builds with cache)
         uses: docker/setup-buildx-action@v3
 
-      - name: 🏗️ Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: 🏷️ Generate image tag (commit SHA for traceability)
+        id: tag
+        run: echo "IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
 
-  # ─────────────────────────────────────────────
-  # JOB 2: Deploy to server via SSH
-  # ─────────────────────────────────────────────
+      - name: 🏗️ Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
+        run: |
+          # Build with both SHA tag (immutable) and latest tag
+          docker buildx build \
+            --platform linux/amd64 \
+            --cache-from type=registry,ref=$ECR_REGISTRY/$ECR_REPOSITORY:cache \
+            --cache-to type=registry,ref=$ECR_REGISTRY/$ECR_REPOSITORY:cache,mode=max \
+            --tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            --tag $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            --push \
+            .
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "✅ Pushed image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  # ──────────────────────────────────────────────
+  # JOB 3: Deploy to ECS Fargate (Zero Downtime)
+  # ──────────────────────────────────────────────
   deploy:
-    name: 🚢 Deploy to Server
+    name: 🚢 Deploy to ECS Fargate
     runs-on: ubuntu-latest
     needs: build
-    environment: production
+    environment:
+      name: production
+      url: https://circlehq.com  # update with your domain
 
     steps:
-      - name: 🔑 Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔐 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT }}
-          script: |
-            # Log in to GHCR on the server
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-            # Pull the latest image
-            docker pull ghcr.io/${{ github.repository }}:latest
+      - name: 📋 Download current ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition $CONTAINER_NAME \
+            --query taskDefinition \
+            > task-definition.json
+          echo "✅ Downloaded current task definition"
 
-            # Stop & remove existing container (if running)
-            docker stop circlehq-bot || true
-            docker rm circlehq-bot || true
+      - name: 🔄 Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.build.outputs.image }}
 
-            # Run the new container with env vars from server
-            docker run -d \
-              --name circlehq-bot \
-              --restart unless-stopped \
-              -p 3000:3000 \
-              -e NODE_ENV=production \
-              -e TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }} \
-              -e SUPABASE_URL=${{ secrets.SUPABASE_URL }} \
-              -e SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }} \
-              -e GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }} \
-              ghcr.io/${{ github.repository }}:latest
+      - name: 🚀 Deploy to ECS with rolling update (zero downtime)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true  # waits until healthy before marking success
 
-            # Clean up old unused images
-            docker image prune -f
+      - name: 📢 Notify deployment success
+        if: success()
+        run: |
+          echo "🎉 CircleHQ deployed successfully!"
+          echo "Image: ${{ needs.build.outputs.image }}"
+          echo "Cluster: $ECS_CLUSTER"
+          echo "Service: $ECS_SERVICE"
+          echo "Commit: $GITHUB_SHA"
+          echo "Actor: $GITHUB_ACTOR"
 
-            echo "✅ Deployment complete!"
+      - name: ⚠️ Notify deployment failure
+        if: failure()
+        run: |
+          echo "❌ Deployment FAILED for commit $GITHUB_SHA"
+          echo "Check CloudWatch logs: /ecs/$CONTAINER_NAME"
